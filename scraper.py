@@ -130,13 +130,24 @@ def extract_fact(html: str) -> dict:
     raise ValueError("незбалансовані дужки в `fact` — обʼєкт не закрито")
 
 
-def _day_dict(fact: dict, day_key_candidates: list[str]) -> dict | None:
-    """fact орієнтований day-first (data[день][група][година]) — повертає піддерево
-    на потрібний день за першим ключем, що підійшов (дата або 'today'/'tomorrow')."""
-    for key in day_key_candidates:
-        if key in fact and isinstance(fact[key], dict):
-            return fact[key]
-    return None
+def _data_by_date(fact: dict) -> dict:
+    """fact["data"] орієнтований day-first, але ключ дня — Unix-timestamp
+    (підтверджено наживо 2026-10-27: fact={"data":{"<ts>":{"GPV2.2":{...}}},
+    "today":<ts>,"update":...}). Повертає {date: піддерево_дня}, розкодувавши
+    timestamp у київську дату — надійніше за fact["today"] і коректно для DST."""
+    data = fact.get("data")
+    if not isinstance(data, dict):
+        return {}
+    out: dict = {}
+    for ts, day in data.items():
+        if not isinstance(day, dict):
+            continue
+        try:
+            d = datetime.fromtimestamp(int(ts), KYIV_TZ).date()
+        except (ValueError, TypeError, OSError):
+            continue
+        out[d] = day
+    return out
 
 
 def _merge(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -155,13 +166,14 @@ def parse_group_day(day_dict: dict | None, group: str) -> list[str] | None:
     опубліковано (нема піддерева/черги). [] — опубліковано, відключень нема."""
     if day_dict is None:
         return None
-    hours = day_dict.get(group)
-    if hours is None:
+    # Черги в fact — з префіксом "GPV" (GPV2.2), не голий номер.
+    hours = day_dict.get(f"GPV{group}")
+    if not isinstance(hours, dict):
         return None
     raw: list[tuple[float, float]] = []
     for hour in range(24):
         # ДТЕК кодує години ключами "1".."24" (зі зміщенням +1), значення — стан.
-        state = hours.get(str(hour + 1)) if isinstance(hours, dict) else None
+        state = hours.get(str(hour + 1))
         info = _STATE.get(str(state).lower()) if state is not None else None
         if info is None:
             continue
@@ -179,8 +191,9 @@ def _fmt(hour: float) -> str:
 def build_schedule(fact: dict, region: str, groups: list[str], now: datetime) -> dict:
     today = now.date()
     tomorrow = today + timedelta(days=1)
-    today_dict = _day_dict(fact, [today.isoformat(), "today"])
-    tomorrow_dict = _day_dict(fact, [tomorrow.isoformat(), "tomorrow"])
+    by_date = _data_by_date(fact)
+    today_dict = by_date.get(today)
+    tomorrow_dict = by_date.get(tomorrow)
     return {
         "version": 1,
         "updated_at": now.isoformat(),

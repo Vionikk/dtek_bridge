@@ -1,0 +1,50 @@
+name: Scrape DTEK schedule
+
+# Скрейпинг крутиться НА раннері GitHub (його IP Imperva/Incapsula не блокує, на
+# відміну від домашнього/Pi) і публікує schedule.json у гілку `data`. Pi читає цю
+# гілку через raw.githubusercontent.com (публічний репо, без токена).
+on:
+  schedule:
+    # Щогодини о :07. Публічний репо -> хвилини Actions безлімітні, за потреби можна
+    # частіше (напр. "*/30 * * * *" для 30-хв свіжості). cron — за UTC.
+    - cron: "7 * * * *"
+  workflow_dispatch: {}  # ручний запуск з вкладки Actions
+
+# Два паралельні запуски перезаписували б гілку data один одному.
+concurrency:
+  group: scrape-dtek
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # щоб запушити schedule.json у гілку data
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Scrape
+        run: python scraper.py --region kr --out schedule.json --raw-out raw_fact.json
+
+      - name: Publish to data branch
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p ../out && cp schedule.json raw_fact.json ../out/
+          git fetch origin data || true
+          git checkout data 2>/dev/null || git checkout --orphan data
+          git rm -rfq . 2>/dev/null || true
+          cp ../out/schedule.json ../out/raw_fact.json .
+          git add schedule.json raw_fact.json
+          git commit -m "chore: update schedule $(date -u +%FT%TZ)" || { echo "no change"; exit 0; }
+          git push origin data

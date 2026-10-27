@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+schedule.json
+raw_fact.json

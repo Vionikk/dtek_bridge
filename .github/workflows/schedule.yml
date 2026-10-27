@@ -4,9 +4,14 @@ name: Scrape DTEK schedule
 # відміну від домашнього/Pi) і публікує schedule.json у гілку `data`. Pi читає цю
 # гілку через raw.githubusercontent.com (публічний репо, без токена).
 on:
+  # ОСНОВНИЙ драйвер — зовнішній пінг із Pi (cron на Pi раз на 15 хв шле
+  # repository_dispatch, event_type: scrape). Так запуски регулярні, бо власний
+  # schedule-cron GitHub ганяє нерегулярно (той самий підхід, що в mr-devboy).
+  repository_dispatch:
+    types: [scrape]
+  # ЗАПАСНИЙ драйвер на випадок, якщо Pi недоступний. GitHub тримає цей cron
+  # best-effort (часто із затримкою) — тому це лише підстраховка, не основа.
   schedule:
-    # Раз на 15 хв. Публічний репо -> хвилини Actions безлімітні. GitHub може
-    # затримати/пропустити частий cron під навантаженням — тоді спрацює наступний.
     - cron: "*/15 * * * *"
   workflow_dispatch: {}  # ручний запуск з вкладки Actions
 
@@ -17,6 +22,7 @@ concurrency:
 
 permissions:
   contents: write  # щоб запушити schedule.json у гілку data
+  actions: write  # щоб крок keep-alive нижче міг увімкнути workflow
 
 jobs:
   scrape:
@@ -52,3 +58,13 @@ jobs:
           git add -f schedule.json raw_fact.json
           git commit -m "chore: update schedule $(date -u +%FT%TZ)" || { echo "без змін"; exit 0; }
           git push origin data
+
+      - name: Keep workflow enabled
+        # GitHub вимикає заплановані workflow після 60 днів "неактивності"
+        # (пуші бота в data не рахуються). Цей крок на кожному запуску вмикає
+        # workflow назад через штатний GITHUB_TOKEN — без PAT. if: always() —
+        # щоб відпрацьовував навіть коли скрейп/публікація впали.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PUT "repos/${{ github.repository }}/actions/workflows/schedule.yml/enable"

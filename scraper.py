@@ -28,6 +28,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -54,15 +55,48 @@ _STATE = {
 }
 
 
-def fetch_html(region: str, timeout_ms: int = 60_000) -> str:
+def _looks_blocked(html: str) -> bool:
+    low = html.lower()
+    return "_incapsula_resource" in low or "incapsula" in low or "request unsuccessful" in low
+
+
+def scrape_fact(region: str, attempts: int = 3, timeout_ms: int = 60_000) -> dict:
+    """fact із кількома спробами. Дані вбудовані у HTML, тож networkidle не
+    обовʼязковий (на сторінці ДТЕК бувають довгі запити/реклама, що не дають йому
+    настати) — чекаємо його мʼяко, далі коротка пауза на можливий JS-челендж. Якщо
+    прийшла заглушка Imperva — перезавантажуємо. Фінальний збій — із діагностикою в
+    лог Actions (title/довжина/incapsula), щоб було ясно, що саме не так."""
     url = REGION_URLS[region]
+    last_err = "невідомо"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page()
-            page.goto(url, wait_until="load", timeout=timeout_ms)
-            page.wait_for_load_state("networkidle", timeout=timeout_ms)
-            return page.content()
+            for attempt in range(1, attempts + 1):
+                try:
+                    page.goto(url, wait_until="load", timeout=timeout_ms)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15_000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    page.wait_for_timeout(3_000)
+                    html = page.content()
+                    if _looks_blocked(html):
+                        last_err = "сторінка схожа на заглушку Imperva/Incapsula"
+                        print(f"[спроба {attempt}/{attempts}] {last_err} — перезавантажую…")
+                        page.wait_for_timeout(5_000)
+                        continue
+                    return extract_fact(html)
+                except (PlaywrightTimeoutError, ValueError) as e:
+                    last_err = f"{type(e).__name__}: {e}"
+                    print(f"[спроба {attempt}/{attempts}] не вдалось — {last_err}")
+                    page.wait_for_timeout(5_000)
+            try:
+                html = page.content()
+                diag = f"title={page.title()!r}, html_len={len(html)}, incapsula={_looks_blocked(html)}"
+            except Exception:
+                diag = "сторінку не вдалося прочитати"
+            raise RuntimeError(f"не отримав fact за {attempts} спроб ({last_err}); {diag}")
         finally:
             browser.close()
 
@@ -173,8 +207,7 @@ def main() -> None:
     args = ap.parse_args()
 
     groups = [g.strip() for g in args.groups.split(",") if g.strip()]
-    html = fetch_html(args.region)
-    fact = extract_fact(html)
+    fact = scrape_fact(args.region)
 
     with open(args.raw_out, "w", encoding="utf-8") as f:
         json.dump(fact, f, ensure_ascii=False, indent=2)

@@ -40,11 +40,15 @@ jobs:
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p ../out && cp schedule.json raw_fact.json ../out/
+          # Виносимо артефакти за межі репо (git rm нижче чистить робочу теку).
+          mkdir -p "$RUNNER_TEMP/out" && cp schedule.json raw_fact.json "$RUNNER_TEMP/out/"
+          # Прибираємо untracked-артефакти, інакше checkout data (де вони трековані) впаде.
+          rm -f schedule.json raw_fact.json
           git fetch origin data || true
           git checkout data 2>/dev/null || git checkout --orphan data
           git rm -rfq . 2>/dev/null || true
-          cp ../out/schedule.json ../out/raw_fact.json .
-          git add schedule.json raw_fact.json
-          git commit -m "chore: update schedule $(date -u +%FT%TZ)" || { echo "no change"; exit 0; }
+          cp "$RUNNER_TEMP/out/schedule.json" "$RUNNER_TEMP/out/raw_fact.json" .
+          # -f: гілка data може нести .gitignore, що ігнорує ці файли.
+          git add -f schedule.json raw_fact.json
+          git commit -m "chore: update schedule $(date -u +%FT%TZ)" || { echo "без змін"; exit 0; }
           git push origin data

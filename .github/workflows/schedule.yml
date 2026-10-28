@@ -27,6 +27,7 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # зависла сторінка не має їсти годинник раннера
     steps:
       - uses: actions/checkout@v4
 
@@ -36,28 +37,38 @@ jobs:
           cache: pip
 
       - run: pip install -r requirements.txt
-      - run: python -m playwright install --with-deps chromium
+
+      # Раннер щоразу чистий, тож без кешу Chromium (~150 МБ) качався б із CDN на
+      # кожному запуску. Ключ — хеш requirements.txt: нова версія playwright -> новий
+      # браузер. Системні бібліотеки (install-deps) кешувати не можна — це apt.
+      - uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+      - if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install chromium
+      - run: python -m playwright install-deps chromium
 
       - name: Scrape
         run: python scraper.py --region kr --out schedule.json --raw-out raw_fact.json
 
+      # Гілка data — завжди РІВНО один коміт: orphan + push --force. Історія графіків
+      # нікому не потрібна, а коміт на кожен запуск роздував би репозиторій.
+      # Пушимо щоразу, навіть без змін у графіку: updated_at — це "пульс" містка,
+      # по ньому Pi відрізняє живий скрейпер від мертвого (max_age_minutes).
       - name: Publish to data branch
         run: |
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Виносимо артефакти за межі репо (git rm нижче чистить робочу теку).
-          mkdir -p "$RUNNER_TEMP/out" && cp schedule.json raw_fact.json "$RUNNER_TEMP/out/"
-          # Прибираємо untracked-артефакти, інакше checkout data (де вони трековані) впаде.
-          rm -f schedule.json raw_fact.json
-          git fetch origin data || true
-          git checkout data 2>/dev/null || git checkout --orphan data
-          git rm -rfq . 2>/dev/null || true
-          cp "$RUNNER_TEMP/out/schedule.json" "$RUNNER_TEMP/out/raw_fact.json" .
-          # -f: гілка data може нести .gitignore, що ігнорує ці файли.
+          # Порожній індекс + лише два файли: коміт містить тільки їх, а робоча тека
+          # лишається цілою (post-кроки кешу ще читають requirements.txt).
+          git checkout --orphan data-publish
+          git rm -rfq --cached .
           git add -f schedule.json raw_fact.json
-          git commit -m "chore: update schedule $(date -u +%FT%TZ)" || { echo "без змін"; exit 0; }
-          git push origin data
+          git commit -qm "chore: update schedule $(date -u +%FT%TZ)"
+          git push --force origin HEAD:data
 
       - name: Keep workflow enabled
         # GitHub вимикає заплановані workflow після 60 днів "неактивності"
